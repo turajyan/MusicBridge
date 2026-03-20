@@ -1,35 +1,45 @@
 # MusicBridge 🎵
 
-Cross-platform music library sync tool. Stream your favorites between **Tidal** and **Spotify** via a real-time SSE API.
+Cross-platform music library sync tool. Streams your favorites between **Tidal** and **Spotify** via a real-time SSE API.
 
 ## Stack
 
 - **Backend**: FastAPI + uvicorn
+- **Frontend**: nginx (reverse proxy + static)
 - **Tidal**: tidalapi (OAuth device flow)
-- **Spotify**: spotipy (OAuth2 PKCE)
+- **Spotify**: spotipy (OAuth2)
 - **Streaming**: Server-Sent Events (SSE)
+
+## Sync Algorithm
+
+```
+For each track in source library:
+  1. Has ISRC?
+     ├── YES → check if ISRC exists in destination
+     │         ├── EXISTS  → SKIP (100% accurate duplicate detection)
+     │         └── MISSING → search by "Artist + Title" → ADD
+     └── NO  → search by "Artist + Title" → ADD
+```
+
+**ISRC** (International Standard Recording Code) is a unique global identifier per recording. Using it as the primary key guarantees zero false duplicates — no mismatches from title variations, reissues, or regional differences.
+
+Fallback to `"Artist + Title"` search handles edge cases where ISRC metadata is absent.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/turajyan/MusicBridge.git
+cd MusicBridge
+cp .env.example .env
+# Fill in your Spotify credentials in .env
+docker-compose up --build
 ```
 
-Set your Spotify credentials in `app/main.py`:
+## Endpoints
 
-```python
-SPOTIFY_CLIENT_ID     = "your_client_id"
-SPOTIFY_CLIENT_SECRET = "your_client_secret"
-SPOTIFY_REDIRECT_URI  = "http://localhost:8080"
-```
-
-## Run
-
-```bash
-python app/main.py
-```
-
-Server starts at `http://localhost:8000`
+- **UI**: `http://localhost:80`
+- **API**: `http://localhost:80/api/`
+- **Spotify callback**: `http://localhost:8080`
 
 ## API
 
@@ -43,24 +53,27 @@ Server starts at `http://localhost:8000`
 }
 ```
 
-Returns an SSE stream of sync progress events:
+Returns an SSE stream:
 
-```json
-{"msg": "TIDAL ACCESS GRANTED.", "level": "success"}
-{"msg": "Extracted 120 tracks from TIDAL.", "level": "success"}
+```
+data: {"msg": "TIDAL READY.", "level": "success"}
+data: {"msg": "Found 120 tracks in Source.", "level": "success"}
+data: {"msg": "SKIPPED: Pink Floyd - Comfortably Numb (Already exists)", "level": "info"}
+data: {"msg": "ADDED: Radiohead - Creep", "level": "success"}
+data: {"msg": "NOT FOUND: Some Obscure Track", "level": "error"}
 ```
 
-### Levels
+### SSE Levels
 
 | Level | Meaning |
 |-------|---------|
-| `info` | General progress |
-| `success` | Step completed |
-| `error` | Action required / failure |
+| `info` | Progress / skipped |
+| `success` | Step completed / track added |
+| `error` | Action required / not found / failure |
 
-## Supported Platforms
+## Supported Directions
 
-| Platform | Source | Destination |
-|----------|--------|-------------|
-| Tidal | ✅ | 🔜 |
-| Spotify | ✅ | 🔜 |
+| Source | Destination | Status |
+|--------|-------------|--------|
+| Tidal | Spotify | ✅ |
+| Spotify | Tidal | ✅ |
