@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./backend
+    container_name: musicbridge-api
+    ports:
+      - "8000:8000"
+      - "8080:8080" # Порт для Spotify Auth Callback
+      - "8081:8081" # Запасной порт для Auth
+    environment:
+      - SPOTIFY_CLIENT_ID=ваш_ключ
+      - SPOTIFY_CLIENT_SECRET=ваш_секрет
+      - SPOTIFY_REDIRECT_URI=http://localhost:8080
+    volumes:
+      - ./backend:/app # Для горячей перезагрузки при разработке
+
+  frontend:
+    build: ./frontend
+    container_name: musicbridge-ui
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
