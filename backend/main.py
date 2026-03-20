@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sync_engine import ArtistSyncer, TrackSyncer
 
 app = FastAPI(title="MusicBridge Sync Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -16,45 +17,27 @@ SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "default_id")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "default_secret")
 SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8080")
 
+SYNCER_MAP = {
+    "artists": ArtistSyncer,
+    "tracks":  TrackSyncer,
+    # "albums": AlbumSyncer,
+}
+
 class SyncPayload(BaseModel):
-    source: str
+    source:      str
     destination: str
-    type: str
-
-def parse_spotify_track(item: dict) -> dict:
-    sp_track = item['track']
-    images = sp_track['album'].get('images', [])
-    return {
-        "artist":      sp_track['artists'][0]['name'],
-        "title":       sp_track['name'],
-        "isrc":        sp_track['external_ids'].get('isrc'),
-        "cover_url":   images[1]['url'] if len(images) > 1 else (images[0]['url'] if images else None),
-        "preview_url": sp_track.get('preview_url'),  # 30-sec mp3, может быть None
-    }
-
-def parse_tidal_track(t) -> dict:
-    try:
-        cover_url = t.album.image(320)
-    except Exception:
-        cover_url = None
-    # td_track.get_url() требует активного токена с нужным скоупом
-    try:
-        preview_url = t.get_url()
-    except Exception:
-        preview_url = None
-    return {
-        "artist":      t.artist.name,
-        "title":       t.name,
-        "isrc":        t.isrc,
-        "cover_url":   cover_url,
-        "preview_url": preview_url,
-    }
+    type:        str
+    strategy:    str = "skip"  # 'skip' или 'replace'
 
 async def sync_streamer(payload: SyncPayload):
-    def sse(msg: str, level: str = "info") -> str:
+    def sse_sync(msg, level: str = "info") -> str:
         return f"data: {json.dumps({'msg': msg, 'level': level})}\n\n"
 
-    yield sse(f"SYSTEM BOOT: {payload.source.upper()} -> {payload.destination.upper()}", "info")
+    # async-обёртка для передачи в engine.run()
+    async def sse(msg, level: str = "info"):
+        pass  # используется только как сигнатура — yield ниже
+
+    yield sse_sync(f"SYSTEM BOOT: {payload.source.upper()} -> {payload.destination.upper()}", "info")
     loop = asyncio.get_running_loop()
 
     # --- ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ ---
@@ -62,111 +45,67 @@ async def sync_streamer(payload: SyncPayload):
     tidal_session = None
 
     if "spotify" in [payload.source, payload.destination]:
-        yield sse("Awaiting Spotify Authorization in browser...", "error")
+        yield sse_sync("Awaiting Spotify Authorization in browser...", "error")
         def init_spotify():
-            auth_manager = SpotifyOAuth(
+            return spotipy.Spotify(auth_manager=SpotifyOAuth(
                 client_id=SPOTIFY_CLIENT_ID,
                 client_secret=SPOTIFY_CLIENT_SECRET,
                 redirect_uri=SPOTIFY_REDIRECT_URI,
-                scope="user-library-read user-library-modify"
-            )
-            return spotipy.Spotify(auth_manager=auth_manager)
+                scope="user-library-read user-library-modify user-follow-read user-follow-modify"
+            ))
         try:
             sp_client = await loop.run_in_executor(None, init_spotify)
             await loop.run_in_executor(None, sp_client.current_user)
-            yield sse("SPOTIFY READY.", "success")
+            yield sse_sync("SPOTIFY READY.", "success")
         except Exception as e:
-            yield sse(f"Spotify Auth Error: {str(e)}", "error")
+            yield sse_sync(f"Spotify Auth Error: {str(e)}", "error")
             return
 
     if "tidal" in [payload.source, payload.destination]:
         tidal_session = tidalapi.Session()
         login, future = tidal_session.login_oauth()
-        yield sse("===================================", "error")
-        yield sse("TIDAL ACTION REQUIRED. Click link to authorize:", "error")
-        yield sse(f"<a href='{login.verification_uri_complete}' target='_blank' style='color:#ccff00;'>{login.verification_uri_complete}</a>", "success")
-        yield sse("===================================", "error")
+        yield sse_sync("===================================", "error")
+        yield sse_sync("TIDAL ACTION REQUIRED. Click link to authorize:", "error")
+        yield sse_sync(f"<a href='{login.verification_uri_complete}' target='_blank' style='color:#ccff00;'>{login.verification_uri_complete}</a>", "success")
+        yield sse_sync("===================================", "error")
         try:
             await loop.run_in_executor(None, future.result)
             if tidal_session.check_login():
-                yield sse("TIDAL READY.", "success")
+                yield sse_sync("TIDAL READY.", "success")
             else:
                 raise Exception("Tidal session check failed.")
         except Exception as e:
-            yield sse(f"Tidal Auth Error: {str(e)}", "error")
+            yield sse_sync(f"Tidal Auth Error: {str(e)}", "error")
             return
 
-    # --- СБОР ДАННЫХ ИЗ ИСТОЧНИКА ---
-    yield sse(f"Reading library from {payload.source.upper()}...", "info")
-    source_tracks = []
+    # --- ВЫБОР И ЗАПУСК ДВИЖКА ---
+    syncer_class = SYNCER_MAP.get(payload.type)
+    if not syncer_class:
+        yield sse_sync(f"Unknown sync type: '{payload.type}'. Supported: {list(SYNCER_MAP.keys())}", "error")
+        return
 
-    if payload.source == "spotify":
-        def get_sp_tracks():
-            results = sp_client.current_user_saved_tracks(limit=50)
-            return [parse_spotify_track(item) for item in results['items']]
-        source_tracks = await loop.run_in_executor(None, get_sp_tracks)
+    engine = syncer_class(sp_client, tidal_session, payload.strategy)
 
-    elif payload.source == "tidal":
-        def get_td_tracks():
-            return [parse_tidal_track(t) for t in tidal_session.user.favorites.tracks()[:50]]
-        source_tracks = await loop.run_in_executor(None, get_td_tracks)
+    # Буфер SSE-сообщений из engine, т.к. движок async но не генератор
+    queue = asyncio.Queue()
 
-    yield sse(f"Found {len(source_tracks)} tracks in Source.", "success")
+    async def sse_bridge(msg, level="info"):
+        await queue.put(sse_sync(msg, level))
 
-    # --- СИНХРОНИЗАЦИЯ В НАЗНАЧЕНИЕ ---
-    yield sse(f"Pushing to {payload.destination.upper()}...", "info")
+    async def run_engine():
+        await engine.run(payload.source, payload.destination, sse_bridge)
+        await queue.put(None)  # сигнал завершения
 
-    dest_isrcs = set()
-    if payload.destination == "spotify":
-        def get_sp_dest():
-            res = sp_client.current_user_saved_tracks(limit=50)
-            return {item['track']['external_ids'].get('isrc') for item in res['items'] if item['track']['external_ids'].get('isrc')}
-        dest_isrcs = await loop.run_in_executor(None, get_sp_dest)
-    elif payload.destination == "tidal":
-        def get_td_dest():
-            return {t.isrc for t in tidal_session.user.favorites.tracks()[:50] if t.isrc}
-        dest_isrcs = await loop.run_in_executor(None, get_td_dest)
+    engine_task = asyncio.create_task(run_engine())
 
-    for track in source_tracks:
-        await asyncio.sleep(0.5)
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        yield item
 
-        if track["isrc"] and track["isrc"] in dest_isrcs:
-            yield sse(f"SKIPPED: {track['artist']} - {track['title']} (Already exists)", "info")
-            continue
-
-        query = f"{track['artist']} {track['title']}"
-
-        try:
-            success = False
-
-            if payload.destination == "spotify":
-                def search_and_add_sp():
-                    res = sp_client.search(q=query, type='track', limit=1)
-                    if res['tracks']['items']:
-                        sp_id = res['tracks']['items'][0]['id']
-                        sp_client.current_user_saved_tracks_add([sp_id])
-                        return True
-                    return False
-                success = await loop.run_in_executor(None, search_and_add_sp)
-
-            elif payload.destination == "tidal":
-                def search_and_add_td():
-                    res = tidal_session.search("track", query)
-                    if res['tracks']:
-                        tidal_session.user.favorites.add_track(res['tracks'][0].id)
-                        return True
-                    return False
-                success = await loop.run_in_executor(None, search_and_add_td)
-
-            if success:
-                yield sse(f"ADDED: {track['artist']} - {track['title']}", "success")
-            else:
-                yield sse(f"NOT FOUND: {track['artist']} - {track['title']}", "error")
-
-        except Exception as e:
-            yield sse(f"FAILED: {track['title']} ({str(e)})", "error")
-
-    yield sse("SYNC PROTOCOL COMPLETED.", "success")
+    await engine_task
+    yield sse_sync("SYNC PROTOCOL COMPLETED.", "success")
 
 @app.post("/api/v1/sync/start")
 async def start_sync(payload: SyncPayload):

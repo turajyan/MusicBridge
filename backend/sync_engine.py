@@ -94,3 +94,115 @@ class ArtistSyncer(BaseSyncer):
             return True
         except Exception:
             return False
+
+
+class TrackSyncer(BaseSyncer):
+
+    async def get_items(self, platform):
+        """Получает треки с обложками и ISRC"""
+        items = []
+        if platform == 'spotify':
+            results = self.sp.current_user_saved_tracks(limit=50)
+            for item in results['items']:
+                t = item['track']
+                images = t['album'].get('images', [])
+                cover = images[1]['url'] if len(images) > 1 else (images[0]['url'] if images else '')
+                items.append({
+                    'id':          t['id'],
+                    'name':        t['name'],
+                    'artist':      t['artists'][0]['name'],
+                    'isrc':        t['external_ids'].get('isrc'),
+                    'cover':       cover,
+                    'preview_url': t.get('preview_url'),
+                })
+
+        elif platform == 'tidal':
+            for t in self.td.user.favorites.tracks()[:50]:
+                try:
+                    cover = t.album.image(320)
+                except Exception:
+                    cover = ''
+                items.append({
+                    'id':          t.id,
+                    'name':        t.name,
+                    'artist':      t.artist.name,
+                    'isrc':        t.isrc,
+                    'cover':       cover,
+                    'preview_url': None,
+                })
+        return items
+
+    async def run(self, source, dest, sse_yield):
+        """Цикл синхронизации треков с ISRC-дедупликацией"""
+        await sse_yield(f"Fetching library from {source.upper()}...", "info")
+        source_items = await self.get_items(source)
+        await sse_yield(f"Found {len(source_items)} tracks.", "success")
+
+        await sse_yield(f"Fetching existing library from {dest.upper()}...", "info")
+        dest_items = await self.get_items(dest)
+        # ISRC как primary key, fallback на "artist - name"
+        dest_isrcs = {item['isrc'] for item in dest_items if item['isrc']}
+        dest_names = {f"{item['artist'].lower()} {item['name'].lower()}" for item in dest_items}
+
+        for item in source_items:
+            await asyncio.sleep(0.5)
+
+            # Дедупликация по ISRC (100% точность)
+            if self.strategy == 'skip':
+                if item['isrc'] and item['isrc'] in dest_isrcs:
+                    await sse_yield(f"SKIPPED: {item['artist']} - {item['name']} (ISRC match)", "log-info")
+                    continue
+                if f"{item['artist'].lower()} {item['name'].lower()}" in dest_names:
+                    await sse_yield(f"SKIPPED: {item['artist']} - {item['name']} (name match)", "log-info")
+                    continue
+
+            match = await self.search_item(dest, f"{item['artist']} {item['name']}")
+
+            if not match:
+                await sse_yield(f"NOT FOUND: {item['artist']} - {item['name']}", "error")
+                continue
+
+            visual_payload = {
+                "action": "visualize",
+                "data": {
+                    "source": {"title": item['name'], "artist": item['artist'], "cover": item['cover']},
+                    "dest":   {"title": match['name'], "artist": match['artist'], "cover": match['cover']}
+                }
+            }
+            await sse_yield(visual_payload, "visualize")
+
+            success = await self.add_item(dest, match['id'])
+            if success:
+                await sse_yield(f"ADDED: {item['artist']} - {item['name']}", "success")
+            else:
+                await sse_yield(f"FAILED: {item['artist']} - {item['name']}", "error")
+
+    async def search_item(self, platform, query):
+        if platform == 'spotify':
+            res = self.sp.search(q=query, type='track', limit=1)
+            if res['tracks']['items']:
+                t = res['tracks']['items'][0]
+                images = t['album'].get('images', [])
+                cover = images[1]['url'] if len(images) > 1 else (images[0]['url'] if images else '')
+                return {'id': t['id'], 'name': t['name'], 'artist': t['artists'][0]['name'], 'cover': cover}
+
+        elif platform == 'tidal':
+            res = self.td.search("track", query)
+            if res['tracks']:
+                t = res['tracks'][0]
+                try:
+                    cover = t.album.image(320)
+                except Exception:
+                    cover = ''
+                return {'id': t.id, 'name': t.name, 'artist': t.artist.name, 'cover': cover}
+        return None
+
+    async def add_item(self, platform, item_id):
+        try:
+            if platform == 'spotify':
+                self.sp.current_user_saved_tracks_add([item_id])
+            elif platform == 'tidal':
+                self.td.user.favorites.add_track(item_id)
+            return True
+        except Exception:
+            return False
