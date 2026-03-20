@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tidalapi
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -11,11 +12,9 @@ from pydantic import BaseModel
 app = FastAPI(title="MusicBridge Core")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- НАСТРОЙКИ SPOTIFY ---
-SPOTIFY_CLIENT_ID = "ВАШ_SPOTIFY_CLIENT_ID"
-SPOTIFY_CLIENT_SECRET = "ВАШ_SPOTIFY_CLIENT_SECRET"
-SPOTIFY_REDIRECT_URI = "http://localhost:8080"
-# -------------------------
+SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8080")
 
 class SyncPayload(BaseModel):
     source: str
@@ -30,16 +29,13 @@ async def sync_streamer(payload: SyncPayload):
     loop = asyncio.get_running_loop()
     source_tracks = []
 
-    # ==========================================
-    # ИСТОЧНИК (SOURCE)
-    # ==========================================
     yield sse(f"Connecting to SOURCE: {payload.source.upper()}...", "info")
 
     if payload.source == "tidal":
         session = tidalapi.Session()
         login, future = session.login_oauth()
         yield sse("===================================", "error")
-        yield sse(f"TIDAL ACTION: Click link to authorize:", "error")
+        yield sse("TIDAL ACTION: Click link to authorize:", "error")
         yield sse(f"<a href='{login.verification_uri_complete}' target='_blank' style='color:#ccff00;'>{login.verification_uri_complete}</a>", "success")
         yield sse("===================================", "error")
 
@@ -74,14 +70,10 @@ async def sync_streamer(payload: SyncPayload):
 
     yield sse(f"Extracted {len(source_tracks)} tracks from {payload.source.upper()}.", "success")
 
-    # ==========================================
-    # НАЗНАЧЕНИЕ (DESTINATION)
-    # ==========================================
     yield sse(f"Connecting to DESTINATION: {payload.destination.upper()}...", "info")
-
     yield sse("Normalizing metadata and searching for matches...", "info")
 
-    for i, track in enumerate(source_tracks[:5]):
+    for track in source_tracks[:5]:
         await asyncio.sleep(0.5)
         yield sse(f"Matched: {track['artist']} — {track['name']} -> Ready to push to {payload.destination.upper()}", "success")
 
