@@ -1,5 +1,6 @@
-fastapi
-uvicorn
-tidalapi
-spotipy
-pydantic
+fastapi==0.110.0
+uvicorn==0.28.0
+tidalapi==0.8.3
+spotipy==2.23.0
+httpx==0.27.0
+
