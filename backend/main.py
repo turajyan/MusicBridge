@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sync_engine import ArtistSyncer, TrackSyncer
+from sync_engine import ArtistSyncer, TrackSyncer, AlbumSyncer
 
 app = FastAPI(title="MusicBridge Sync Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -20,7 +20,7 @@ SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8080
 SYNCER_MAP = {
     "artists": ArtistSyncer,
     "tracks":  TrackSyncer,
-    # "albums": AlbumSyncer,
+    "albums":  AlbumSyncer,
 }
 
 class SyncPayload(BaseModel):

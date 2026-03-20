@@ -206,3 +206,106 @@ class TrackSyncer(BaseSyncer):
             return True
         except Exception:
             return False
+
+
+class AlbumSyncer(BaseSyncer):
+
+    async def get_items(self, platform):
+        """Получает сохранённые альбомы с обложками"""
+        items = []
+        if platform == 'spotify':
+            results = self.sp.current_user_saved_albums(limit=50)
+            for item in results['items']:
+                a = item['album']
+                images = a.get('images', [])
+                cover = images[1]['url'] if len(images) > 1 else (images[0]['url'] if images else '')
+                items.append({
+                    'id':     a['id'],
+                    'name':   a['name'],
+                    'artist': a['artists'][0]['name'],
+                    'cover':  cover,
+                })
+
+        elif platform == 'tidal':
+            for a in self.td.user.favorites.albums()[:50]:
+                try:
+                    cover = a.image(320)
+                except Exception:
+                    cover = ''
+                items.append({
+                    'id':     a.id,
+                    'name':   a.name,
+                    'artist': a.artist.name,
+                    'cover':  cover,
+                })
+        return items
+
+    async def search_item(self, platform, query):
+        if platform == 'spotify':
+            res = self.sp.search(q=query, type='album', limit=1)
+            if res['albums']['items']:
+                a = res['albums']['items'][0]
+                images = a.get('images', [])
+                cover = images[1]['url'] if len(images) > 1 else (images[0]['url'] if images else '')
+                return {'id': a['id'], 'name': a['name'], 'artist': a['artists'][0]['name'], 'cover': cover}
+
+        elif platform == 'tidal':
+            res = self.td.search("album", query)
+            if res['albums']:
+                a = res['albums'][0]
+                try:
+                    cover = a.image(320)
+                except Exception:
+                    cover = ''
+                return {'id': a.id, 'name': a.name, 'artist': a.artist.name, 'cover': cover}
+        return None
+
+    async def add_item(self, platform, item_id):
+        try:
+            if platform == 'spotify':
+                self.sp.current_user_saved_albums_add([item_id])
+            elif platform == 'tidal':
+                self.td.user.favorites.add_album(item_id)
+            return True
+        except Exception:
+            return False
+
+    async def run(self, source, dest, sse_yield):
+        await sse_yield(f"Fetching albums from {source.upper()}...", "info")
+        source_items = await self.get_items(source)
+        await sse_yield(f"Found {len(source_items)} albums.", "success")
+
+        await sse_yield(f"Fetching existing albums from {dest.upper()}...", "info")
+        dest_items = await self.get_items(dest)
+        dest_names = {f"{item['artist'].lower()} {item['name'].lower()}" for item in dest_items}
+
+        for item in source_items:
+            await asyncio.sleep(0.5)
+
+            if self.strategy == 'skip':
+                key = f"{item['artist'].lower()} {item['name'].lower()}"
+                if key in dest_names:
+                    await sse_yield(f"SKIPPED: {item['artist']} - {item['name']} (Already saved)", "log-info")
+                    continue
+
+            query = f"{item['artist']} {item['name']}"
+            match = await self.search_item(dest, query)
+
+            if not match:
+                await sse_yield(f"NOT FOUND: {item['artist']} - {item['name']}", "error")
+                continue
+
+            visual_payload = {
+                "action": "visualize",
+                "data": {
+                    "source": {"title": item['name'],  "artist": item['artist'],  "cover": item['cover']},
+                    "dest":   {"title": match['name'], "artist": match['artist'], "cover": match['cover']}
+                }
+            }
+            await sse_yield(visual_payload, "visualize")
+
+            success = await self.add_item(dest, match['id'])
+            if success:
+                await sse_yield(f"SAVED: {item['artist']} - {item['name']}", "success")
+            else:
+                await sse_yield(f"FAILED: {item['artist']} - {item['name']}", "error")
