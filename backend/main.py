@@ -1,6 +1,7 @@
 import asyncio
 import json
 import pathlib
+import cancel
 import tidalapi
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -34,6 +35,7 @@ SSE_HEADERS = {
     "Cache-Control":     "no-cache",
     "Connection":        "keep-alive",
 }
+
 
 # ─── Глобальный PKCE state (один логин за раз) ────────────────────
 _pkce_session: tidalapi.Session | None = None
@@ -125,6 +127,11 @@ async def tidal_auth_logout():
         TIDAL_SESSION_FILE.unlink()
     return JSONResponse({"status": "logged_out"})
 
+@app.post("/api/v1/sync/stop")
+async def stop_sync():
+    cancel.stop()
+    return JSONResponse({"status": "stopping"})
+
 @app.get("/auth/tidal/status")
 async def tidal_auth_status():
     """Проверяет статус авторизации Tidal."""
@@ -137,6 +144,8 @@ async def tidal_auth_status():
 async def sync_streamer(payload: SyncPayload):
     def sse(msg, level: str = "info") -> str:
         return f"data: {json.dumps({'msg': msg, 'level': level})}\n\n"
+
+    cancel.reset()
 
     yield sse(f"SYSTEM BOOT: {payload.source.upper()} -> {payload.destination.upper()}", "info")
 
@@ -198,13 +207,22 @@ async def sync_streamer(payload: SyncPayload):
 
     engine_task = asyncio.create_task(run_engine())
     while True:
-        item = await queue.get()
+        if cancel.is_cancelled():
+            engine_task.cancel()
+            yield sse("Sync cancelled by user.", "error")
+            yield sse("TERMINATED.", "error")
+            break
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
         if item is None:
             break
         yield item
 
-    await engine_task
-    yield sse("SYNC PROTOCOL COMPLETED.", "success")
+    if not _sync_cancelled:
+        await engine_task
+        yield sse("SYNC PROTOCOL COMPLETED.", "success")
 
 @app.post("/api/v1/sync/start")
 async def start_sync(payload: SyncPayload):
@@ -215,6 +233,7 @@ async def start_sync(payload: SyncPayload):
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import pathlib
+import cancel
 
 _static_dir = pathlib.Path(__file__).parent / "static"
 if _static_dir.exists():

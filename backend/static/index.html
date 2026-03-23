@@ -703,9 +703,11 @@ function startSync() {
   });
 }
 
-function stopSync() {
+async function stopSync() {
+  try { await fetch('/api/v1/sync/stop', {method: 'POST'}); } catch(e) {}
   if (eventSource) { try { eventSource.cancel(); } catch(e) {} eventSource = null; }
   onSyncDone();
+  logLine('Sync stopped by user.', 'error');
 }
 
 function onSyncDone() {

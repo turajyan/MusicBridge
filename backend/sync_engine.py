@@ -1,5 +1,6 @@
 import asyncio
 import tidalapi
+import cancel
 
 
 def _run_sync(loop, fn, *args):
@@ -96,6 +97,9 @@ class ArtistSyncer(BaseSyncer):
         dest_names = {item['name'].lower() for item in dest_items}
 
         for item in source_items:
+            if cancel.is_cancelled():
+                await sse_yield("Sync cancelled by user.", "error")
+                return
             await asyncio.sleep(0.5)
 
             if self.strategy == 'skip' and item['name'].lower() in dest_names:
@@ -211,6 +215,9 @@ class TrackSyncer(BaseSyncer):
         dest_names = {f"{item['artist'].lower()} {item['name'].lower()}" for item in dest_items}
 
         for item in source_items:
+            if cancel.is_cancelled():
+                await sse_yield("Sync cancelled by user.", "error")
+                return
             await asyncio.sleep(0.5)
 
             if self.strategy == 'skip':
@@ -315,6 +322,9 @@ class AlbumSyncer(BaseSyncer):
         dest_names = {f"{item['artist'].lower()} {item['name'].lower()}" for item in dest_items}
 
         for item in source_items:
+            if cancel.is_cancelled():
+                await sse_yield("Sync cancelled by user.", "error")
+                return
             await asyncio.sleep(0.5)
 
             if self.strategy == 'skip':
