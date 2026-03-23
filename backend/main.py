@@ -250,7 +250,7 @@ async def sync_streamer(payload: SyncPayload):
             break
         yield item
 
-    if not _sync_cancelled:
+    if not cancel.is_cancelled():
         await engine_task
         yield sse("SYNC PROTOCOL COMPLETED.", "success")
 
