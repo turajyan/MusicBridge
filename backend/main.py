@@ -1,11 +1,12 @@
 import os
 import asyncio
 import json
+import pathlib
 import tidalapi
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sync_engine import ArtistSyncer, TrackSyncer, AlbumSyncer
@@ -16,6 +17,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "default_id")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "default_secret")
 SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8080")
+TIDAL_SESSION_FILE    = pathlib.Path("tidal_session.json")
 
 SYNCER_MAP = {
     "artists": ArtistSyncer,
@@ -24,36 +26,128 @@ SYNCER_MAP = {
 }
 
 SSE_HEADERS = {
-    "X-Accel-Buffering": "no",   # отключает буферизацию nginx
+    "X-Accel-Buffering": "no",
     "Cache-Control":     "no-cache",
     "Connection":        "keep-alive",
 }
 
+# ─── Глобальный PKCE state (один логин за раз) ────────────────────
+_pkce_session: tidalapi.Session | None = None
+_pkce_url:     str | None = None
+
+# ─── Models ───────────────────────────────────────────────────────
 class SyncPayload(BaseModel):
     source:      str
     destination: str
     type:        str
-    strategy:    str = "skip"  # 'skip' или 'replace'
+    strategy:    str = "skip"
 
+class TidalCallbackPayload(BaseModel):
+    oops_url: str  # URL страницы "Oops" после логина
+
+# ─── Tidal Auth Helpers ───────────────────────────────────────────
+def _load_tidal_session() -> tidalapi.Session | None:
+    """Загружает сессию из файла. Возвращает None если файла нет или сессия протухла."""
+    if not TIDAL_SESSION_FILE.exists():
+        return None
+    try:
+        session = tidalapi.Session()
+        session.load_session_from_file(TIDAL_SESSION_FILE)
+        if session.check_login():
+            return session
+    except Exception:
+        pass
+    return None
+
+def _save_tidal_session(session: tidalapi.Session):
+    session.save_session_to_file(TIDAL_SESSION_FILE)
+
+# ─── Auth Endpoints ───────────────────────────────────────────────
+@app.get("/auth/tidal")
+async def tidal_auth_start():
+    """
+    Возвращает PKCE URL для авторизации.
+    Если сессия уже есть — сообщает об этом.
+    """
+    global _pkce_session, _pkce_url
+
+    # Пробуем загрузить существующую сессию
+    session = await asyncio.get_running_loop().run_in_executor(None, _load_tidal_session)
+    if session:
+        return JSONResponse({"status": "already_authorized", "user_id": session.user.id})
+
+    # Создаём новую PKCE сессию
+    _pkce_session = tidalapi.Session()
+    _pkce_url = _pkce_session.pkce_login_url()
+
+    return JSONResponse({"status": "auth_required", "url": _pkce_url})
+
+@app.post("/auth/tidal/callback")
+async def tidal_auth_callback(payload: TidalCallbackPayload):
+    """
+    Принимает URL страницы 'Oops' после логина в Tidal.
+    Завершает PKCE авторизацию и сохраняет сессию.
+    """
+    global _pkce_session
+
+    if not _pkce_session:
+        raise HTTPException(status_code=400, detail="Auth not started. Call GET /auth/tidal first.")
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        token = await loop.run_in_executor(
+            None, lambda: _pkce_session.pkce_get_auth_token(payload.oops_url)
+        )
+        await loop.run_in_executor(
+            None, lambda: _pkce_session.process_auth_token(token, is_pkce_token=True)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Tidal auth failed: {str(e)}")
+
+    if not _pkce_session.check_login():
+        raise HTTPException(status_code=401, detail="Tidal session invalid after auth.")
+
+    await loop.run_in_executor(None, lambda: _save_tidal_session(_pkce_session))
+
+    user_id = _pkce_session.user.id
+    _pkce_session = None  # сбрасываем state
+    return JSONResponse({"status": "authorized", "user_id": user_id})
+
+@app.delete("/auth/tidal")
+async def tidal_auth_logout():
+    """Удаляет сохранённую сессию Tidal."""
+    if TIDAL_SESSION_FILE.exists():
+        TIDAL_SESSION_FILE.unlink()
+    return JSONResponse({"status": "logged_out"})
+
+@app.get("/auth/tidal/status")
+async def tidal_auth_status():
+    """Проверяет статус авторизации Tidal."""
+    session = await asyncio.get_running_loop().run_in_executor(None, _load_tidal_session)
+    if session:
+        return JSONResponse({"authorized": True, "user_id": session.user.id})
+    return JSONResponse({"authorized": False})
+
+# ─── Sync ─────────────────────────────────────────────────────────
 async def sync_streamer(payload: SyncPayload):
     def sse(msg, level: str = "info") -> str:
         return f"data: {json.dumps({'msg': msg, 'level': level})}\n\n"
 
     yield sse(f"SYSTEM BOOT: {payload.source.upper()} -> {payload.destination.upper()}", "info")
 
-    # --- РАННЯЯ ВАЛИДАЦИЯ ТИПА ---
+    # Ранняя валидация типа
     syncer_class = SYNCER_MAP.get(payload.type)
     if not syncer_class:
         yield sse(f"Unknown sync type: '{payload.type}'. Supported: {list(SYNCER_MAP.keys())}", "error")
         yield sse("TERMINATED.", "error")
-        return  # генератор завершается — соединение закрывается
+        return
 
     loop = asyncio.get_running_loop()
-
-    # --- ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ ---
     sp_client     = None
     tidal_session = None
 
+    # ── Spotify ──
     if "spotify" in [payload.source, payload.destination]:
         yield sse("Awaiting Spotify Authorization in browser...", "error")
         def init_spotify():
@@ -72,25 +166,18 @@ async def sync_streamer(payload: SyncPayload):
             yield sse("TERMINATED.", "error")
             return
 
+    # ── Tidal: файл → иначе просим авторизоваться ──
     if "tidal" in [payload.source, payload.destination]:
-        tidal_session = tidalapi.Session()
-        login, future = tidal_session.login_oauth()
-        yield sse("===================================", "error")
-        yield sse("TIDAL ACTION REQUIRED. Click link to authorize:", "error")
-        yield sse(f"<a href='{login.verification_uri_complete}' target='_blank' style='color:#ccff00;'>{login.verification_uri_complete}</a>", "success")
-        yield sse("===================================", "error")
-        try:
-            await loop.run_in_executor(None, future.result)
-            if tidal_session.check_login():
-                yield sse("TIDAL READY.", "success")
-            else:
-                raise Exception("Tidal session check failed.")
-        except Exception as e:
-            yield sse(f"Tidal Auth Error: {str(e)}", "error")
+        tidal_session = await loop.run_in_executor(None, _load_tidal_session)
+        if tidal_session:
+            yield sse(f"TIDAL READY (saved session). User: {tidal_session.user.id}", "success")
+        else:
+            yield sse("TIDAL NOT AUTHORIZED.", "error")
+            yield sse("Открой /auth/tidal в браузере, авторизуйся и передай Oops-URL на /auth/tidal/callback", "error")
             yield sse("TERMINATED.", "error")
             return
 
-    # --- ЗАПУСК ДВИЖКА ---
+    # ── Запуск движка ──
     engine = syncer_class(sp_client, tidal_session, payload.strategy)
     queue  = asyncio.Queue()
 
@@ -103,10 +190,9 @@ async def sync_streamer(payload: SyncPayload):
         except Exception as e:
             await queue.put(sse(f"Engine error: {str(e)}", "error"))
         finally:
-            await queue.put(None)  # всегда сигнализируем завершение
+            await queue.put(None)
 
     engine_task = asyncio.create_task(run_engine())
-
     while True:
         item = await queue.get()
         if item is None:
@@ -118,8 +204,4 @@ async def sync_streamer(payload: SyncPayload):
 
 @app.post("/api/v1/sync/start")
 async def start_sync(payload: SyncPayload):
-    return StreamingResponse(
-        sync_streamer(payload),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
-    )
+    return StreamingResponse(sync_streamer(payload), media_type="text/event-stream", headers=SSE_HEADERS)
