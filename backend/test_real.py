@@ -1,10 +1,11 @@
 """
 MusicBridge — тест с реальными токенами.
 Запускать локально: python3 test_real.py
-
 Настройки — в test_config.py (не попадает в git).
 """
 import asyncio
+import json
+import pathlib
 from sync_engine import TrackSyncer, ArtistSyncer, AlbumSyncer
 
 try:
@@ -26,8 +27,8 @@ RESET  = "\033[0m"
 TIDAL_SESSION_FILE = "tidal_session.json"
 
 def log(msg, level="info"):
-    colors  = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW}
-    prefix  = {"info": "►", "success": "✓", "error": "✗", "log-info": "~", "visualize": "🖼"}.get(level, "•")
+    colors = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW}
+    prefix = {"info": "►", "success": "✓", "error": "✗", "log-info": "~", "visualize": "🖼"}.get(level, "•")
     if level == "visualize" and isinstance(msg, dict):
         d    = msg.get("data", {})
         src  = d.get("source", {})
@@ -55,18 +56,20 @@ async def init_tidal():
     except Exception:
         pass  # нет файла или сессия устарела
 
-    # Новый логин
+    # Новый OAuth логин — ждём реального завершения, не глотаем ошибки
     login, future = session.login_oauth()
     print(f"{YELLOW}Открой в браузере:{RESET} {login.verification_uri_complete}\n")
+    await loop.run_in_executor(None, future.result)
 
+    # Сохраняем токен вручную (не через login_session_file — он перезаписывает сессию)
     try:
-        await loop.run_in_executor(None, future.result)
-    except Exception:
-        pass  # 401 при внутренней верификации — игнорируем, проверяем вручную
-
-    # Сохраняем сессию
-    try:
-        await loop.run_in_executor(None, lambda: session.login_session_file(TIDAL_SESSION_FILE))
+        token_data = {
+            "token_type":    session.token_type,
+            "access_token":  session.access_token,
+            "refresh_token": session.refresh_token,
+            "expiry_time":   session.expiry_time.isoformat() if session.expiry_time else None,
+        }
+        pathlib.Path(TIDAL_SESSION_FILE).write_text(json.dumps(token_data))
     except Exception:
         pass
 
