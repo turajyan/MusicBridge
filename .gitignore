@@ -10,3 +10,4 @@ dist/
 backend/tidal_session.json
 backend/.spotify_cache
 backend/test_config.py
+backend/config.py

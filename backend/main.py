@@ -1,4 +1,3 @@
-import os
 import asyncio
 import json
 import pathlib
@@ -11,13 +10,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sync_engine import ArtistSyncer, TrackSyncer, AlbumSyncer
 
+try:
+    import config
+    SPOTIFY_CLIENT_ID     = config.SPOTIFY_CLIENT_ID
+    SPOTIFY_CLIENT_SECRET = config.SPOTIFY_CLIENT_SECRET
+    SPOTIFY_REDIRECT_URI  = config.SPOTIFY_REDIRECT_URI
+except ImportError:
+    raise RuntimeError("config.py not found. Copy config.example.py -> config.py and fill in your credentials.")
+
+TIDAL_SESSION_FILE = pathlib.Path("tidal_session.json")
+
 app = FastAPI(title="MusicBridge Sync Engine")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "default_id")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "default_secret")
-SPOTIFY_REDIRECT_URI  = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8080")
-TIDAL_SESSION_FILE    = pathlib.Path("tidal_session.json")
 
 SYNCER_MAP = {
     "artists": ArtistSyncer,
