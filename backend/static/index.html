@@ -593,6 +593,11 @@ async function checkSpotify() {
 async function openTidalAuth() {
   try {
     const r = await fetch(`${API}/auth/tidal`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({detail: r.statusText}));
+      log(`Tidal auth error: ${err.detail || r.statusText}`, 'error');
+      return;
+    }
     const d = await r.json();
     if (d.status === 'already_authorized') {
       await checkTidalStatus();
@@ -604,7 +609,7 @@ async function openTidalAuth() {
     document.getElementById('tidal-auth-link').textContent = d.url.slice(0, 60) + '...';
     document.getElementById('tidal-modal').classList.add('visible');
   } catch(e) {
-    log(`Tidal auth error: ${e}`, 'error');
+    log(`Tidal auth error: ${e.message} — is the server running on port 8000?`, 'error');
   }
 }
 

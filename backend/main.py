@@ -77,16 +77,23 @@ async def tidal_auth_start():
     """
     global _pkce_session, _pkce_url
 
-    # Пробуем загрузить существующую сессию
-    session = await asyncio.get_running_loop().run_in_executor(None, _load_tidal_session)
-    if session:
-        return JSONResponse({"status": "already_authorized", "user_id": session.user.id})
+    # Удаляем битый файл сессии если есть
+    try:
+        session = await asyncio.get_running_loop().run_in_executor(None, _load_tidal_session)
+        if session:
+            return JSONResponse({"status": "already_authorized", "user_id": session.user.id})
+    except Exception as e:
+        # Файл есть но битый — удаляем
+        if TIDAL_SESSION_FILE.exists():
+            TIDAL_SESSION_FILE.unlink()
 
     # Создаём новую PKCE сессию
-    _pkce_session = tidalapi.Session()
-    _pkce_url = _pkce_session.pkce_login_url()
-
-    return JSONResponse({"status": "auth_required", "url": _pkce_url})
+    try:
+        _pkce_session = tidalapi.Session()
+        _pkce_url = _pkce_session.pkce_login_url()
+        return JSONResponse({"status": "auth_required", "url": _pkce_url})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to init Tidal session: {str(e)}")
 
 @app.post("/auth/tidal/callback")
 async def tidal_auth_callback(payload: TidalCallbackPayload):
