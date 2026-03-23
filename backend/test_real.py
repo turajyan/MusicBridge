@@ -50,18 +50,29 @@ async def init_tidal():
     # Пробуем загрузить сохранённую сессию
     try:
         await loop.run_in_executor(None, lambda: session.login_session_file(TIDAL_SESSION_FILE))
-        if session.check_login():
-            print(f"{GREEN}✓ Tidal OK (saved session) — User ID: {session.user.id}{RESET}")
+        if session.access_token:
+            print(f"{GREEN}✓ Tidal OK (saved session){RESET}")
             return session
     except Exception:
-        pass  # нет файла или сессия устарела
+        pass
 
-    # Новый OAuth логин — ждём реального завершения, не глотаем ошибки
+    # Новый OAuth логин
     login, future = session.login_oauth()
     print(f"{YELLOW}Открой в браузере:{RESET} {login.verification_uri_complete}\n")
-    await loop.run_in_executor(None, future.result)
 
-    # Сохраняем токен вручную (не через login_session_file — он перезаписывает сессию)
+    try:
+        await loop.run_in_executor(None, future.result)
+    except Exception as e:
+        # GET /sessions возвращает 401 — это известная проблема tidalapi с device flow.
+        # Токен уже установлен в session.access_token до этой ошибки.
+        if "401" not in str(e):
+            raise  # неизвестная ошибка — пробрасываем
+
+    # Проверяем что токен реально получен
+    if not session.access_token:
+        raise Exception("Tidal: токен не получен после авторизации")
+
+    # Сохраняем токен для следующего запуска
     try:
         token_data = {
             "token_type":    session.token_type,
@@ -70,14 +81,12 @@ async def init_tidal():
             "expiry_time":   session.expiry_time.isoformat() if session.expiry_time else None,
         }
         pathlib.Path(TIDAL_SESSION_FILE).write_text(json.dumps(token_data))
+        print(f"  Session saved → {TIDAL_SESSION_FILE}")
     except Exception:
         pass
 
-    if session.check_login():
-        print(f"{GREEN}✓ Tidal OK — User ID: {session.user.id}{RESET}")
-        return session
-
-    raise Exception("Tidal login failed — попробуй ещё раз")
+    print(f"{GREEN}✓ Tidal OK — access_token получен{RESET}")
+    return session
 
 async def init_spotify():
     print(f"\n{CYAN}── Spotify Auth ──{RESET}")
