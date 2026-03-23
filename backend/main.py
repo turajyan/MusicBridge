@@ -23,6 +23,12 @@ SYNCER_MAP = {
     "albums":  AlbumSyncer,
 }
 
+SSE_HEADERS = {
+    "X-Accel-Buffering": "no",   # отключает буферизацию nginx
+    "Cache-Control":     "no-cache",
+    "Connection":        "keep-alive",
+}
+
 class SyncPayload(BaseModel):
     source:      str
     destination: str
@@ -34,6 +40,14 @@ async def sync_streamer(payload: SyncPayload):
         return f"data: {json.dumps({'msg': msg, 'level': level})}\n\n"
 
     yield sse(f"SYSTEM BOOT: {payload.source.upper()} -> {payload.destination.upper()}", "info")
+
+    # --- РАННЯЯ ВАЛИДАЦИЯ ТИПА ---
+    syncer_class = SYNCER_MAP.get(payload.type)
+    if not syncer_class:
+        yield sse(f"Unknown sync type: '{payload.type}'. Supported: {list(SYNCER_MAP.keys())}", "error")
+        yield sse("TERMINATED.", "error")
+        return  # генератор завершается — соединение закрывается
+
     loop = asyncio.get_running_loop()
 
     # --- ИНИЦИАЛИЗАЦИЯ КЛИЕНТОВ ---
@@ -55,6 +69,7 @@ async def sync_streamer(payload: SyncPayload):
             yield sse("SPOTIFY READY.", "success")
         except Exception as e:
             yield sse(f"Spotify Auth Error: {str(e)}", "error")
+            yield sse("TERMINATED.", "error")
             return
 
     if "tidal" in [payload.source, payload.destination]:
@@ -72,24 +87,23 @@ async def sync_streamer(payload: SyncPayload):
                 raise Exception("Tidal session check failed.")
         except Exception as e:
             yield sse(f"Tidal Auth Error: {str(e)}", "error")
+            yield sse("TERMINATED.", "error")
             return
 
-    # --- ВЫБОР И ЗАПУСК ДВИЖКА ---
-    syncer_class = SYNCER_MAP.get(payload.type)
-    if not syncer_class:
-        yield sse(f"Unknown sync type: '{payload.type}'. Supported: {list(SYNCER_MAP.keys())}", "error")
-        return
-
+    # --- ЗАПУСК ДВИЖКА ---
     engine = syncer_class(sp_client, tidal_session, payload.strategy)
-
-    queue = asyncio.Queue()
+    queue  = asyncio.Queue()
 
     async def sse_bridge(msg, level="info"):
         await queue.put(sse(msg, level))
 
     async def run_engine():
-        await engine.run(payload.source, payload.destination, sse_bridge)
-        await queue.put(None)
+        try:
+            await engine.run(payload.source, payload.destination, sse_bridge)
+        except Exception as e:
+            await queue.put(sse(f"Engine error: {str(e)}", "error"))
+        finally:
+            await queue.put(None)  # всегда сигнализируем завершение
 
     engine_task = asyncio.create_task(run_engine())
 
@@ -104,4 +118,8 @@ async def sync_streamer(payload: SyncPayload):
 
 @app.post("/api/v1/sync/start")
 async def start_sync(payload: SyncPayload):
-    return StreamingResponse(sync_streamer(payload), media_type="text/event-stream")
+    return StreamingResponse(
+        sync_streamer(payload),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
