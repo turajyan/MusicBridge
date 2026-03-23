@@ -23,6 +23,8 @@ YELLOW = "\033[93m"
 CYAN   = "\033[96m"
 RESET  = "\033[0m"
 
+TIDAL_SESSION_FILE = "tidal_session.json"
+
 def log(msg, level="info"):
     colors  = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW}
     prefix  = {"info": "►", "success": "✓", "error": "✗", "log-info": "~", "visualize": "🖼"}.get(level, "•")
@@ -42,14 +44,37 @@ async def sse_print(msg, level="info"):
 async def init_tidal():
     print(f"\n{CYAN}── Tidal Auth ──{RESET}")
     session = tidalapi.Session()
+    loop    = asyncio.get_running_loop()
+
+    # Пробуем загрузить сохранённую сессию
+    try:
+        await loop.run_in_executor(None, lambda: session.login_session_file(TIDAL_SESSION_FILE))
+        if session.check_login():
+            print(f"{GREEN}✓ Tidal OK (saved session) — User ID: {session.user.id}{RESET}")
+            return session
+    except Exception:
+        pass  # нет файла или сессия устарела
+
+    # Новый логин
     login, future = session.login_oauth()
     print(f"{YELLOW}Открой в браузере:{RESET} {login.verification_uri_complete}\n")
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, future.result)
+
+    try:
+        await loop.run_in_executor(None, future.result)
+    except Exception:
+        pass  # 401 при внутренней верификации — игнорируем, проверяем вручную
+
+    # Сохраняем сессию
+    try:
+        await loop.run_in_executor(None, lambda: session.login_session_file(TIDAL_SESSION_FILE))
+    except Exception:
+        pass
+
     if session.check_login():
         print(f"{GREEN}✓ Tidal OK — User ID: {session.user.id}{RESET}")
         return session
-    raise Exception("Tidal login failed")
+
+    raise Exception("Tidal login failed — попробуй ещё раз")
 
 async def init_spotify():
     print(f"\n{CYAN}── Spotify Auth ──{RESET}")
@@ -96,11 +121,11 @@ async def main():
 
     print(f"\n  Первые {min(cfg.LIMIT, len(source_items))} записей:")
     for item in source_items[:cfg.LIMIT]:
-        artist = item.get('artist', item.get('name', '?'))
-        name   = item.get('name', '')
-        isrc   = item.get('isrc', 'n/a')
-        cover  = '✓' if item.get('cover') else '✗'
-        preview= '✓' if item.get('preview_url') else '✗'
+        artist  = item.get('artist', item.get('name', '?'))
+        name    = item.get('name', '')
+        isrc    = item.get('isrc', 'n/a')
+        cover   = '✓' if item.get('cover') else '✗'
+        preview = '✓' if item.get('preview_url') else '✗'
         print(f"    • {artist} — {name}")
         print(f"      isrc={isrc}  cover={cover}  preview={preview}")
 
