@@ -7,6 +7,6 @@ venv/
 *.egg-info/
 dist/
 .cache/
-tidal_session.json
-.spotify_cache
+backend/tidal_session.json
+backend/.spotify_cache
 backend/test_config.py
