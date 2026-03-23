@@ -1,27 +1,21 @@
 """
 MusicBridge — тест с реальными токенами.
 Запускать локально: python3 test_real.py
+
+Настройки — в test_config.py (не попадает в git).
 """
 import asyncio
-import json
-import tidalapi
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
 from sync_engine import TrackSyncer, ArtistSyncer, AlbumSyncer
 
-# ─── НАСТРОЙКИ ────────────────────────────────────────────────────
-SPOTIFY_CLIENT_ID     = "ВАШ_CLIENT_ID"
-SPOTIFY_CLIENT_SECRET = "ВАШ_CLIENT_SECRET"
-SPOTIFY_REDIRECT_URI  = "http://127.0.0.1:8080"
+try:
+    import test_config as cfg
+except ImportError:
+    print("ERROR: test_config.py не найден.")
+    print("Скопируй: cp test_config.example.py test_config.py и заполни токены.")
+    exit(1)
 
-# Что тестируем
-SOURCE      = "tidal"    # "tidal" или "spotify"
-DESTINATION = "spotify"  # "tidal" или "spotify"
-SYNC_TYPE   = "tracks"   # "tracks", "artists", "albums"
-STRATEGY    = "skip"     # "skip" или "replace"
-DRY_RUN     = True       # True = только читаем, не добавляем
-LIMIT       = 5          # сколько треков обрабатываем в тесте
-# ──────────────────────────────────────────────────────────────────
+import tidalapi, spotipy
+from spotipy.oauth2 import SpotifyOAuth
 
 GREEN  = "\033[92m"
 RED    = "\033[91m"
@@ -30,16 +24,16 @@ CYAN   = "\033[96m"
 RESET  = "\033[0m"
 
 def log(msg, level="info"):
-    colors = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW, "visualize": ""}
-    color = colors.get(level, "")
-    prefix = {"info": "►", "success": "✓", "error": "✗", "log-info": "~", "visualize": "🖼"}.get(level, "•")
+    colors  = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW}
+    prefix  = {"info": "►", "success": "✓", "error": "✗", "log-info": "~", "visualize": "🖼"}.get(level, "•")
     if level == "visualize" and isinstance(msg, dict):
-        d = msg.get("data", {})
+        d    = msg.get("data", {})
         src  = d.get("source", {})
         dest = d.get("dest", {})
         print(f"  🖼  {src.get('artist')} — {src.get('title')}  →  {dest.get('artist')} — {dest.get('title')}")
         print(f"      cover: {src.get('cover', 'n/a')[:60]}...")
     else:
+        color = colors.get(level, "")
         print(f"{color}{prefix} [{level}] {msg}{RESET}")
 
 async def sse_print(msg, level="info"):
@@ -61,10 +55,10 @@ async def init_spotify():
     print(f"\n{CYAN}── Spotify Auth ──{RESET}")
     loop = asyncio.get_running_loop()
     def _auth():
-        sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET,
-            redirect_uri=SPOTIFY_REDIRECT_URI,
+        sp   = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            client_id=cfg.SPOTIFY_CLIENT_ID,
+            client_secret=cfg.SPOTIFY_CLIENT_SECRET,
+            redirect_uri=cfg.SPOTIFY_REDIRECT_URI,
             scope="user-library-read user-library-modify user-follow-read user-follow-modify"
         ))
         user = sp.current_user()
@@ -76,65 +70,62 @@ async def init_spotify():
 async def main():
     print(f"\n{'='*55}")
     print(f"  MusicBridge Real Token Test")
-    print(f"  {SOURCE.upper()} → {DESTINATION.upper()} | type={SYNC_TYPE} | dry_run={DRY_RUN}")
+    print(f"  {cfg.SOURCE.upper()} → {cfg.DESTINATION.upper()} | type={cfg.SYNC_TYPE} | dry_run={cfg.DRY_RUN}")
     print(f"{'='*55}")
 
-    # Auth
     sp_client     = None
     tidal_session = None
-    platforms = [SOURCE, DESTINATION]
+    platforms     = [cfg.SOURCE, cfg.DESTINATION]
 
     if "spotify" in platforms:
         sp_client = await init_spotify()
     if "tidal" in platforms:
         tidal_session = await init_tidal()
 
-    # Синкер
     SYNCER_MAP = {"tracks": TrackSyncer, "artists": ArtistSyncer, "albums": AlbumSyncer}
-    syncer = SYNCER_MAP[SYNC_TYPE](sp_client, tidal_session, STRATEGY)
+    syncer = SYNCER_MAP[cfg.SYNC_TYPE](sp_client, tidal_session, cfg.STRATEGY)
 
     # Читаем source
-    print(f"\n{CYAN}── Source Library ({SOURCE.upper()}) ──{RESET}")
-    source_items = await syncer.get_items(SOURCE)
-    print(f"  Найдено: {len(source_items)} {SYNC_TYPE}")
+    print(f"\n{CYAN}── Source Library ({cfg.SOURCE.upper()}) ──{RESET}")
+    source_items = await syncer.get_items(cfg.SOURCE)
+    print(f"  Найдено: {len(source_items)} {cfg.SYNC_TYPE}")
 
     if not source_items:
         print(f"{RED}  Пусто — проверь авторизацию и библиотеку{RESET}")
         return
 
-    # Показываем первые LIMIT
-    print(f"\n  Первые {min(LIMIT, len(source_items))} записей:")
-    for item in source_items[:LIMIT]:
-        isrc = item.get('isrc', 'n/a')
-        cover = '✓' if item.get('cover') else '✗'
-        preview = '✓' if item.get('preview_url') else '✗'
+    print(f"\n  Первые {min(cfg.LIMIT, len(source_items))} записей:")
+    for item in source_items[:cfg.LIMIT]:
         artist = item.get('artist', item.get('name', '?'))
         name   = item.get('name', '')
+        isrc   = item.get('isrc', 'n/a')
+        cover  = '✓' if item.get('cover') else '✗'
+        preview= '✓' if item.get('preview_url') else '✗'
         print(f"    • {artist} — {name}")
         print(f"      isrc={isrc}  cover={cover}  preview={preview}")
 
     # Читаем dest
-    print(f"\n{CYAN}── Dest Library ({DESTINATION.upper()}) ──{RESET}")
-    dest_items = await syncer.get_items(DESTINATION)
-    print(f"  Найдено: {len(dest_items)} {SYNC_TYPE}")
+    print(f"\n{CYAN}── Dest Library ({cfg.DESTINATION.upper()}) ──{RESET}")
+    dest_items = await syncer.get_items(cfg.DESTINATION)
+    print(f"  Найдено: {len(dest_items)} {cfg.SYNC_TYPE}")
 
-    # Dry-run: поиск без добавления
-    print(f"\n{CYAN}── Search Test (первые {LIMIT} треков) ──{RESET}")
-    for item in source_items[:LIMIT]:
+    # Тест поиска
+    print(f"\n{CYAN}── Search Test (первые {cfg.LIMIT}) ──{RESET}")
+    for item in source_items[:cfg.LIMIT]:
         artist = item.get('artist', item.get('name', ''))
         name   = item.get('name', '')
         query  = f"{artist} {name}".strip()
-        match  = await syncer.search_item(DESTINATION, query)
+        match  = await syncer.search_item(cfg.DESTINATION, query)
         if match:
             print(f"  {GREEN}✓{RESET} {query[:45]:<45} → {match['name'][:30]}")
         else:
             print(f"  {RED}✗{RESET} {query[:45]:<45} → NOT FOUND")
 
-    if not DRY_RUN:
+    if not cfg.DRY_RUN:
         print(f"\n{CYAN}── Full Sync ──{RESET}")
-        await syncer.run(SOURCE, DESTINATION, sse_print)
+        await syncer.run(cfg.SOURCE, cfg.DESTINATION, sse_print)
     else:
         print(f"\n{YELLOW}DRY_RUN=True — добавление пропущено.{RESET}")
-        print(f"Установи DRY_RUN=False для реального sync.\n")
+        print(f"Установи DRY_RUN=False в test_config.py для реального sync.\n")
 
 asyncio.run(main())

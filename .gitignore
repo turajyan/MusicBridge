@@ -9,3 +9,4 @@ dist/
 .cache/
 tidal_session.json
 .spotify_cache
+backend/test_config.py
