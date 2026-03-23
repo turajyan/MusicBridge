@@ -4,7 +4,6 @@ MusicBridge — тест с реальными токенами.
 Настройки — в test_config.py (не попадает в git).
 """
 import asyncio
-import json
 import pathlib
 from sync_engine import TrackSyncer, ArtistSyncer, AlbumSyncer
 
@@ -24,7 +23,7 @@ YELLOW = "\033[93m"
 CYAN   = "\033[96m"
 RESET  = "\033[0m"
 
-TIDAL_SESSION_FILE = "tidal_session.json"
+TIDAL_SESSION_FILE = pathlib.Path("tidal_session.json")
 
 def log(msg, level="info"):
     colors = {"info": CYAN, "success": GREEN, "error": RED, "log-info": YELLOW}
@@ -43,50 +42,36 @@ async def sse_print(msg, level="info"):
     log(msg, level)
 
 async def init_tidal():
-    print(f"\n{CYAN}── Tidal Auth ──{RESET}")
+    """
+    Использует PKCE flow через login_session_file(do_pkce=True):
+    - Если tidal_session.json существует и валиден — логинится без браузера
+    - Если нет — показывает PKCE URL, ждёт вставки redirect URL ("Oops" страница)
+    - Сохраняет сессию автоматически
+    """
+    print(f"\n{CYAN}── Tidal Auth (PKCE) ──{RESET}")
     session = tidalapi.Session()
     loop    = asyncio.get_running_loop()
 
-    # Пробуем загрузить сохранённую сессию
-    try:
-        await loop.run_in_executor(None, lambda: session.login_session_file(TIDAL_SESSION_FILE))
-        if session.access_token:
-            print(f"{GREEN}✓ Tidal OK (saved session){RESET}")
-            return session
-    except Exception:
-        pass
+    def _do_login():
+        # fn_print — перехватываем вывод библиотеки для красивого отображения
+        def fn_print(msg):
+            if "http" in msg.lower():
+                print(f"\n{YELLOW}Открой в браузере:{RESET}")
+                print(f"  {msg}")
+                print(f"\n{YELLOW}После логина браузер перейдёт на страницу с ошибкой ('Oops').")
+                print(f"Скопируй URL этой страницы и вставь ниже.{RESET}\n")
+            else:
+                print(f"  {msg}")
 
-    # Новый OAuth логин
-    login, future = session.login_oauth()
-    print(f"{YELLOW}Открой в браузере:{RESET} {login.verification_uri_complete}\n")
+        return session.login_session_file(TIDAL_SESSION_FILE, do_pkce=True, fn_print=fn_print)
 
-    try:
-        await loop.run_in_executor(None, future.result)
-    except Exception as e:
-        # GET /sessions возвращает 401 — это известная проблема tidalapi с device flow.
-        # Токен уже установлен в session.access_token до этой ошибки.
-        if "401" not in str(e):
-            raise  # неизвестная ошибка — пробрасываем
+    result = await loop.run_in_executor(None, _do_login)
 
-    # Проверяем что токен реально получен
-    if not session.access_token:
-        raise Exception("Tidal: токен не получен после авторизации")
+    if result and session.check_login():
+        print(f"{GREEN}✓ Tidal OK — User ID: {session.user.id}{RESET}")
+        return session
 
-    # Сохраняем токен для следующего запуска
-    try:
-        token_data = {
-            "token_type":    session.token_type,
-            "access_token":  session.access_token,
-            "refresh_token": session.refresh_token,
-            "expiry_time":   session.expiry_time.isoformat() if session.expiry_time else None,
-        }
-        pathlib.Path(TIDAL_SESSION_FILE).write_text(json.dumps(token_data))
-        print(f"  Session saved → {TIDAL_SESSION_FILE}")
-    except Exception:
-        pass
-
-    print(f"{GREEN}✓ Tidal OK — access_token получен{RESET}")
-    return session
+    raise Exception("Tidal login failed")
 
 async def init_spotify():
     print(f"\n{CYAN}── Spotify Auth ──{RESET}")
