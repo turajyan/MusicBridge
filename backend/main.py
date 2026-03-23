@@ -134,6 +134,29 @@ async def tidal_auth_logout():
         TIDAL_SESSION_FILE.unlink()
     return JSONResponse({"status": "logged_out"})
 
+@app.get("/debug/spotify")
+async def debug_spotify():
+    """Показывает текущий токен и скоупы Spotify."""
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
+    try:
+        sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=SPOTIFY_REDIRECT_URI,
+            scope="user-library-read user-library-modify user-follow-read user-follow-modify"
+        ))
+        token_info = sp.auth_manager.get_cached_token()
+        user = sp.current_user()
+        return JSONResponse({
+            "user": user.get("display_name"),
+            "user_id": user.get("id"),
+            "scope": token_info.get("scope") if token_info else "no cached token",
+            "token_type": token_info.get("token_type") if token_info else None,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
 @app.post("/api/v1/sync/stop")
 async def stop_sync():
     cancel.stop()
