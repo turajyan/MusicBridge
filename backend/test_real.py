@@ -12,7 +12,7 @@ from sync_engine import TrackSyncer, ArtistSyncer, AlbumSyncer
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────
 SPOTIFY_CLIENT_ID     = "ВАШ_CLIENT_ID"
 SPOTIFY_CLIENT_SECRET = "ВАШ_CLIENT_SECRET"
-SPOTIFY_REDIRECT_URI  = "http://localhost:8080"
+SPOTIFY_REDIRECT_URI  = "http://127.0.0.1:8080"
 
 # Что тестируем
 SOURCE      = "tidal"    # "tidal" или "spotify"
