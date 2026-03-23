@@ -3,4 +3,4 @@ uvicorn==0.28.0
 pydantic==2.6.4
 tidalapi==0.8.3
 spotipy==2.23.0
-
+aiofiles==23.2.1

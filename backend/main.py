@@ -205,3 +205,17 @@ async def sync_streamer(payload: SyncPayload):
 @app.post("/api/v1/sync/start")
 async def start_sync(payload: SyncPayload):
     return StreamingResponse(sync_streamer(payload), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+# ─── Static Frontend ──────────────────────────────────────────────
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import pathlib
+
+_static_dir = pathlib.Path(__file__).parent / "static"
+if _static_dir.exists():
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+    @app.get("/")
+    async def root():
+        return FileResponse(_static_dir / "index.html")
