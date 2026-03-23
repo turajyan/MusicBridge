@@ -70,7 +70,7 @@ async def init_spotify():
         user = sp.current_user()
         return sp, user
     sp, user = await loop.run_in_executor(None, _auth)
-    print(f"{GREEN}✓ Spotify OK — {user['display_name']} ({user['email']}){RESET}")
+    print(f"{GREEN}✓ Spotify OK — {user['display_name']} ({user.get('email', user['id'])}){RESET}")
     return sp
 
 async def main():
